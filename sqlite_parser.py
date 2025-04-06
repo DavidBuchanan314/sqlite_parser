@@ -8,9 +8,11 @@ from typing import BinaryIO, Optional, Dict, Tuple
 from enum import Enum
 from dataclasses import dataclass
 from functools import lru_cache
+from sentinel import MIN_SENTINEL, MAX_SENTINEL
 import struct
 import random
 import io
+
 
 def parse_varint(stream: BinaryIO) -> int:
 	n = 0
@@ -19,16 +21,18 @@ def parse_varint(stream: BinaryIO) -> int:
 		if not val:
 			raise ValueError("unexpected end of varint input")
 		val = val[0]
-		n = (n << 7) | (val & 0x7f)
+		n = (n << 7) | (val & 0x7F)
 		if not val & 0x80:
 			return n
 	raise ValueError("varint too long")
+
 
 def parse_be_uint(stream: BinaryIO, n: int) -> int:
 	data = stream.read(n)
 	if len(data) != n:
 		raise ValueError("uint underread")
 	return int.from_bytes(data, "big")
+
 
 def parse_be_int(stream: BinaryIO, n: int) -> int:
 	data = stream.read(n)
@@ -42,12 +46,14 @@ class TextEncoding(Enum):
 	UTF16LE = 2
 	UTF16BE = 3
 
+
 # map to something we can pass to python .encode()/.decode()
 TEXT_ENCODING_MAP = {
 	TextEncoding.UTF8: "utf-8",
 	TextEncoding.UTF16LE: "utf-16-le",
 	TextEncoding.UTF16BE: "utf-16-be",
 }
+
 
 @dataclass(frozen=True)
 class DatabaseHeader:
@@ -71,65 +77,73 @@ class DatabaseHeader:
 	sqlite_version_number: int
 
 	@classmethod
-	def parse(cls, stream: BinaryIO, check_magic: bool = True) -> "DatabaseHeader":
+	def parse(
+		cls, stream: BinaryIO, check_magic: bool = True
+	) -> "DatabaseHeader":
 		magic = stream.read(len(DatabaseHeader.HEADER_MAGIC))
 		if check_magic and magic != DatabaseHeader.HEADER_MAGIC:
 			raise ValueError("not a database")
-		
+
 		page_size = parse_be_uint(stream, 2)
 		if page_size == 1:
 			page_size = 65536
 		elif page_size < 512 or page_size > 32768 or page_size.bit_count() != 1:
 			raise ValueError(f"invalid page size ({page_size})")
-		
-		write_version = parse_be_uint(stream, 1) # not checked
+
+		write_version = parse_be_uint(stream, 1)  # not checked
 		read_version = parse_be_uint(stream, 1)
-		
+
 		if read_version != 1:  # only support "legacy" for now (not WAL)
 			raise ValueError(f"unsupported read version ({read_version})")
-		
+
 		rsvd_per_page = parse_be_uint(stream, 1)
 
-		if parse_be_uint(stream, 1) != DatabaseHeader.MAX_EMBEDDED_PAYLOAD_FRACTION:
+		if (
+			parse_be_uint(stream, 1)
+			!= DatabaseHeader.MAX_EMBEDDED_PAYLOAD_FRACTION
+		):
 			raise ValueError("invalid max embedded payload fraction")
-		
-		if parse_be_uint(stream, 1) != DatabaseHeader.MIN_EMBEDDED_PAYLOAD_FRACTION:
+
+		if (
+			parse_be_uint(stream, 1)
+			!= DatabaseHeader.MIN_EMBEDDED_PAYLOAD_FRACTION
+		):
 			raise ValueError("invalid min embedded payload fraction")
-		
+
 		if parse_be_uint(stream, 1) != DatabaseHeader.LEAF_PAYLOAD_FRACTION:
 			raise ValueError("invalid leaf payload fraction")
 
-		file_change_counter = parse_be_uint(stream, 4) # ignored
+		file_change_counter = parse_be_uint(stream, 4)  # ignored
 		page_count = parse_be_uint(stream, 4)
 		first_freelist_trunk_page = parse_be_uint(stream, 4)
 		freelist_page_count = parse_be_uint(stream, 4)
-		schema_cookie = parse_be_uint(stream, 4) # ignored
+		schema_cookie = parse_be_uint(stream, 4)  # ignored
 		schema_format = parse_be_uint(stream, 4)
 
 		if schema_format != 4:
 			raise ValueError(f"unsupported schema format ({schema_format})")
 
-		default_page_cache_size = parse_be_uint(stream, 4) # ignored
+		default_page_cache_size = parse_be_uint(stream, 4)  # ignored
 		vacuum_thing = parse_be_uint(stream, 4)
 		if vacuum_thing != 0:
 			raise ValueError("unsupported")
 
 		text_encoding = TextEncoding(parse_be_uint(stream, 4))
-		
+
 		user_version = parse_be_uint(stream, 4)
 		incremental_vacuum = parse_be_uint(stream, 4)
 		if incremental_vacuum != 0:
 			raise ValueError("unsupported")
-		
+
 		application_id = parse_be_uint(stream, 4)
 
 		rsvd = stream.read(20)
 		if any(rsvd):
 			raise ValueError("invalid reserved bytes")
-		
+
 		version_valid_for_number = parse_be_uint(stream, 4)
 		sqlite_version_number = parse_be_uint(stream, 4)
-		
+
 		return cls(
 			page_size=page_size,
 			write_version=write_version,
@@ -146,11 +160,13 @@ class DatabaseHeader:
 			sqlite_version_number=sqlite_version_number,
 		)
 
+
 class BTreePageType(Enum):
 	IDX_INTERIOR = 0x02
 	TBL_INTERIOR = 0x05
-	IDX_LEAF = 0x0a
-	TBL_LEAF = 0x0d
+	IDX_LEAF = 0x0A
+	TBL_LEAF = 0x0D
+
 
 @dataclass(frozen=True)
 class BTreePageHeader:
@@ -161,7 +177,7 @@ class BTreePageHeader:
 	fragmented_free_bytes: int
 	right_ptr: Optional[int]
 	cell_offsets: Tuple[int]
-	
+
 	@classmethod
 	def parse(cls, stream: BinaryIO) -> "BTreePageHeader":
 		page_type = BTreePageType(parse_be_uint(stream, 1))
@@ -171,13 +187,18 @@ class BTreePageHeader:
 		if cell_content_start == 0:
 			cell_content_start = 65536
 		fragmented_free_bytes = parse_be_uint(stream, 1)
-		if page_type in [BTreePageType.IDX_INTERIOR, BTreePageType.TBL_INTERIOR]:
+		if page_type in [
+			BTreePageType.IDX_INTERIOR,
+			BTreePageType.TBL_INTERIOR,
+		]:
 			right_ptr = parse_be_uint(stream, 4)
 		else:
 			right_ptr = None
 
 		# technically this isn't part of the header, but it makes sense to parse here
-		cell_offsets = tuple(x[0] for x in struct.iter_unpack(">H", stream.read(num_cells * 2)))
+		cell_offsets = tuple(
+			x[0] for x in struct.iter_unpack(">H", stream.read(num_cells * 2))
+		)
 
 		return cls(
 			page_type=page_type,
@@ -201,20 +222,21 @@ class Database:
 		# implicitly defined schema table
 		self.table_roots = {"sqlite_schema": 1}
 		self.table_schemas = {
-			"sqlite_schema":
-			"CREATE TABLE sqlite_schema(type text, name text, tbl_name text, rootpage integer, sql text)"
+			"sqlite_schema": "CREATE TABLE sqlite_schema(type text, name text, tbl_name text, rootpage integer, sql text)"
 		}
 
 		# parse all of sqlite_schema
-		for idx, (type_, name, tbl_name, rootpage, sql) in self.scan_table("sqlite_schema"):
-			#print(idx, (type_, name, tbl_name, rootpage, sql))
+		for idx, (type_, name, tbl_name, rootpage, sql) in self.scan_table(
+			"sqlite_schema"
+		):
+			# print(idx, (type_, name, tbl_name, rootpage, sql))
 			if type_ == "table":
 				if name != tbl_name:
 					raise ValueError("table name mismatch")
 				self.table_roots[name] = rootpage
 				self.table_schemas[name] = sql
 				print(name, sql)
-	
+
 	def seek_page(self, idx: int) -> None:
 		# start counting from 1
 		self.file.seek((idx - 1) * self.hdr.page_size)
@@ -230,18 +252,45 @@ class Database:
 		if len(page) != self.hdr.page_size:
 			raise ValueError("page underread")
 		pagestream = io.BytesIO(page)
-		if idx == 1: # special case for first page, skip the db header
+		if idx == 1:  # special case for first page, skip the db header
 			pagestream.seek(100)
 		hdr = BTreePageHeader.parse(pagestream)
 		return hdr, io.BytesIO(page)
 
-	def scan_table(self, name: str):
-		return self._scan_btree(self.table_roots[name])
+	def scan_table(self, name: str, num_key_cols: int = 0):
+		"""
+		num_key_cols is 0 for rowid tables, and >0 for WITHOUT ROWID tables, or indexes
+		"""
+		return self._scan_btree_range(
+			self.table_roots[name],
+			num_key_cols,
+			minkey=MIN_SENTINEL,
+			maxkey=MAX_SENTINEL,
+		)
 
-	def lookup_row(self, name: str, rowid: int):
-		return self._search_btree(self.table_roots[name], rowid)
+	def lookup_row(self, name: str, key: int | tuple):
+		"""
+		an int key is a rowid, whereas tuples are for WITHOUT ROWID tables, or indexes
+		"""
+		k, row = next(
+			self._scan_btree_range(
+				self.table_roots[name],
+				len(key) if isinstance(key, tuple) else 0,
+				minkey=key,
+				maxkey=MAX_SENTINEL,
+			)
+		)
+		if k != key:
+			raise ValueError("key not found")
+		return row
 
-	def _parse_payload(self, stream: BinaryIO, payload_len: int, page_type: BTreePageType):
+	def _parse_payload(
+		self, stream: BinaryIO, payload_len: int, page_type: BTreePageType
+	):
+		"""
+		Mysterious single-letter variables come from https://www.sqlite.org/fileformat.html
+		"""
+
 		U = self.hdr.page_size - self.hdr.rsvd_per_page
 		P = payload_len
 		if page_type == BTreePageType.TBL_LEAF:
@@ -265,7 +314,7 @@ class Database:
 			payload_len -= bytes_stored_in_leaf_page
 			overflow_page = parse_be_uint(stream, 4)
 			while payload_len:
-				#print("overflow", overflow_page)
+				# print("overflow", overflow_page)
 				self.seek_page(overflow_page)
 				overflow_page = parse_be_uint(self.file, 4)
 				length_to_read = min(U - 4, payload_len)
@@ -279,79 +328,77 @@ class Database:
 		payload.seek(0)
 		return self._parse_record(payload)
 
-	def _scan_btree(self, idx: int):
+	def _scan_btree_range(self, idx: int, num_key_cols: int, minkey, maxkey):
 		hdr, page = self.get_btree_page(idx)
 
 		if hdr.page_type == BTreePageType.TBL_INTERIOR:
+			assert num_key_cols == 0
+			# TODO: support range queries
 			for cell_offset in hdr.cell_offsets:
 				page.seek(cell_offset)
 				left_child = parse_be_uint(page, 4)
-				#rowid = parse_varint(page)
-				yield from self._scan_btree(left_child)
-				#print("rowid", rowid)
-			yield from self._scan_btree(hdr.right_ptr)
+				yield from self._scan_btree_range(
+					left_child, num_key_cols, minkey, maxkey
+				)
+			yield from self._scan_btree_range(hdr.right_ptr)
 		elif hdr.page_type == BTreePageType.TBL_LEAF:
+			assert num_key_cols == 0
+			# TODO: support range queries
 			for cell_offset in hdr.cell_offsets:
 				page.seek(cell_offset)
 				payload_len = parse_varint(page)
 				rowid = parse_varint(page)
-				yield rowid, self._parse_payload(page, payload_len, hdr.page_type)
+				yield (
+					rowid,
+					self._parse_payload(page, payload_len, hdr.page_type),
+				)
 		elif hdr.page_type == BTreePageType.IDX_INTERIOR:
+			assert num_key_cols > 0
 			for cell_offset in hdr.cell_offsets:
 				page.seek(cell_offset)
 				left_child = parse_be_uint(page, 4)
 				payload_len = parse_varint(page)
-				payload_offset = page.tell()
-				yield from self._scan_btree(left_child)
-				page.seek(payload_offset)
-				yield None, self._parse_payload(page, payload_len, hdr.page_type)
-			yield from self._scan_btree(hdr.right_ptr)
+				payload = self._parse_payload(page, payload_len, hdr.page_type)
+				key, value = (
+					tuple(next(payload) for _ in range(num_key_cols)),
+					tuple(payload),
+				)
+				# print("interior k", key)
+				# TODO: not sure these range checks are totally correct...
+				if key < minkey:
+					continue
+				if key > minkey:
+					yield from self._scan_btree_range(
+						left_child, num_key_cols, minkey, maxkey
+					)
+				if key >= maxkey:
+					return
+				yield key, value
+			yield from self._scan_btree_range(
+				hdr.right_ptr, num_key_cols, minkey, maxkey
+			)
 		elif hdr.page_type == BTreePageType.IDX_LEAF:
+			assert num_key_cols > 0
 			for cell_offset in hdr.cell_offsets:
 				page.seek(cell_offset)
 				payload_len = parse_varint(page)
-				yield None, self._parse_payload(page, payload_len, hdr.page_type)
+				payload = self._parse_payload(page, payload_len, hdr.page_type)
+				key, value = (
+					tuple(next(payload) for _ in range(num_key_cols)),
+					tuple(payload),
+				)
+				if minkey <= key < maxkey:
+					yield key, value
 		else:
-			raise NotImplementedError("TODO")
-	
-	def _search_btree(self, idx: int, target_rowid: int):
-		"""
-		We actually do a linear scan thru each page - unsure if it's worth
-		doing a proper binary search or not
-		"""
-		hdr, page = self.get_btree_page(idx)
+			raise ValueError("Invalid BTreePageType (unreachable???)")
 
-		if hdr.page_type == BTreePageType.TBL_INTERIOR:
-			for cell_offset in hdr.cell_offsets:
-				page.seek(cell_offset + 4)
-				rowid = parse_varint(page)
-				if rowid >= target_rowid:
-					page.seek(cell_offset)
-					left_child = parse_be_uint(page, 4)
-					return self._search_btree(left_child, target_rowid)
-			return self._search_btree(hdr.right_ptr, target_rowid)
-		elif hdr.page_type == BTreePageType.TBL_LEAF:
-			for cell_offset in hdr.cell_offsets:
-				page.seek(cell_offset)
-				payload_len = parse_varint(page)
-				rowid = parse_varint(page)
-				if rowid == target_rowid:
-					return self._parse_payload(page, payload_len, hdr.page_type)
-				# TODO: early-exit if we've gone past it?
-			else:
-				raise KeyError("row not found")
-		#elif hdr.page_type == BTreePageType.IDX_INTERIOR:
-		#	pass
-		else:
-			raise NotImplementedError("TODO")
-	
 	def _parse_record(self, stream: BinaryIO):
 		start_offset = stream.tell()
 		header_len = parse_varint(stream)
 		serial_types = []
 		while stream.tell() < (start_offset + header_len):
 			serial_types.append(parse_varint(stream))
-		
+
 		# we could pre-calculate the offset of each column, if we wanted to parse out a specific one
 		# (not implemented!)
 		TYPE_LENGTHS = [0, 1, 2, 3, 4, 6, 8, 8, 0, 0]
@@ -362,7 +409,7 @@ class Database:
 			elif serial_type < 7:
 				yield parse_be_int(stream, TYPE_LENGTHS[serial_type])
 			elif serial_type == 7:
-				yield struct.unpack(">d", stream.read(8))[0] # TODO: test this
+				yield struct.unpack(">d", stream.read(8))[0]  # TODO: test this
 			elif serial_type == 8:
 				yield 0
 			elif serial_type == 9:
@@ -386,16 +433,18 @@ if __name__ == "__main__":
 
 		# do a linear scan and record the results
 		test = {}
-		prevk = b"" # minimal
-		for idx, (*row,) in db.scan_table("kv"):
-			#print(idx, row)
-			k, v = row
-			assert k > prevk # check we're iterating in the correct order
-			test[k] = v
+		prevk = MIN_SENTINEL
+		for k, row in db.scan_table("kv", num_key_cols=1):
+			# print(k, row)
+			# print(idx, row)
+			assert k > prevk  # check we're iterating in the correct order
+			test[k] = row
 			prevk = k
 
 		# do some random accesses and check them
-		#for idx in random.choices(list(test.keys()), k=20000):
-		#	assert(list(db.lookup_row("kv", idx)) == test[idx])
+		random.seed(0)
+		for idx in random.choices(list(test.keys()), k=20000):
+			# print("looking up", idx)
+			assert db.lookup_row("kv", idx) == test[idx]
 
 		# TODO: range queries - full scan and key lookup are just special-case range queries!
